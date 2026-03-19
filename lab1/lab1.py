@@ -1,11 +1,11 @@
-import requests                     # для виконання HTTP-запитів до API
-import numpy as np                  # для чисельних обчислень
-import matplotlib.pyplot as plt     # для побудови графіків
-import os                           # для роботи з файловою системою
+import requests
+import numpy as np
+import matplotlib.pyplot as plt
 
-# ==========================================================
+
+# -------------------------------
 # 1. Запит до Open-Elevation API
-# ==========================================================
+# -------------------------------
 
 url = (
     "https://api.open-elevation.com/api/v1/lookup?locations="
@@ -18,231 +18,247 @@ url = (
     "48.161197,24.501793|48.160580,24.500537|48.160250,24.500106"
 )
 
-response = requests.get(url)        # надсилання запиту до сервера
-data = response.json()              # перетворення відповіді у формат JSON
-results = data["results"]           # отримання списку GPS-точок з висотами
+response = requests.get(url, timeout=20)
+response.raise_for_status()
+data = response.json()
+results = data["results"]
 
-n = len(results)                    # кількість точок маршруту
+n = len(results)
+print("Кількість вузлів:", n)
 
-# ==========================================================
-# 2. Запис табуляції у файл
-# ==========================================================
+print("\nТабуляція вузлів:")
+print("№ | Latitude | Longitude | Elevation (m)")
+for i, point in enumerate(results):
+    print(
+        f"{i:2d} | {point['latitude']:.6f} | "
+        f"{point['longitude']:.6f} | "
+        f"{point['elevation']:.2f}"
+    )
 
-with open("tabulation.txt", "w", encoding="utf-8") as f:   # створення текстового файлу
-    f.write("№ | Latitude | Longitude | Elevation (m)\n") # заголовок таблиці
-    for i, p in enumerate(results):                        # перебір усіх точок
-        f.write(
-            f"{i:2d} | {p['latitude']:.6f} | "
-            f"{p['longitude']:.6f} | {p['elevation']:.2f}\n"
-        )                                                   # запис координат і висоти
 
-# ==========================================================
-# 3. Кумулятивна відстань (формула гаверсинусів)
-# ==========================================================
+# -------------------------------
+# 2. Кумулятивна відстань
+# -------------------------------
 
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000                                           # радіус Землі (м)
-    phi1, phi2 = np.radians(lat1), np.radians(lat2)      # широти в радіанах
-    dphi = np.radians(lat2 - lat1)                        # різниця широт
-    dlambda = np.radians(lon2 - lon1)                     # різниця довгот
+    R = 6371000
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlambda = np.radians(lon2 - lon1)
+
     a = (
         np.sin(dphi / 2) ** 2
         + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
-    )                                                     # формула гаверсинуса
-    return 2 * R * np.arctan2(np.sqrt(a), np.sqrt(1 - a)) # відстань між точками
+    )
+    return 2 * R * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
-coords = [(p["latitude"], p["longitude"]) for p in results]   # список координат
-elevations = np.array([p["elevation"] for p in results])     # масив висот
 
-distances = [0]                                          # початкова відстань
+coords = [(p["latitude"], p["longitude"]) for p in results]
+elevations = [p["elevation"] for p in results]
 
-for i in range(1, n):                                    # обхід маршруту
-    d = haversine(*coords[i-1], *coords[i])              # відстань між точками
-    distances.append(distances[-1] + d)                  # накопичення довжини
+distances = [0.0]
+for i in range(1, n):
+    d = haversine(*coords[i - 1], *coords[i])
+    distances.append(distances[-1] + d)
 
-distances = np.array(distances)                          # перетворення у numpy-масив
+print("\nТабуляція (відстань, висота):")
+print("№ | Distance (m) | Elevation (m)")
+for i in range(n):
+    print(f"{i:2d} | {distances[i]:10.2f} | {elevations[i]:8.2f}")
 
-# ==========================================================
-# 4. Метод прогонки (Thomas algorithm)
-# ==========================================================
 
-def thomas(a, b, c, d):
-    n = len(d)                                           # розмір системи
-    c_ = np.zeros(n)                                     # коефіцієнти прямого ходу
-    d_ = np.zeros(n)
+# -------------------------------
+# 2b. Запис табуляції у текстовий файл
+# -------------------------------
 
-    c_[0] = c[0] / b[0]                                  # початкові значення
-    d_[0] = d[0] / b[0]
-
-    for i in range(1, n):                                # прямий хід прогонки
-        temp = b[i] - a[i] * c_[i - 1]
-        c_[i] = c[i] / temp if i < n - 1 else 0
-        d_[i] = (d[i] - a[i] * d_[i - 1]) / temp
-
-    x = np.zeros(n)                                      # масив розв’язку
-    x[-1] = d_[-1]                                       # початок зворотного ходу
-
-    for i in reversed(range(n - 1)):                     # зворотний хід
-        x[i] = d_[i] - c_[i] * x[i + 1]
-
-    return x                                             # повернення розв’язку
-
-# ==========================================================
-# 5. Кубічний натуральний сплайн
-# ==========================================================
-
-def cubic_spline(x, y):
-    n = len(x)                                           # кількість вузлів
-    h = np.diff(x)                                       # кроки між вузлами
-
-    a = np.zeros(n)
-    b = np.zeros(n)
-    c = np.zeros(n)
-    d = np.zeros(n)
-
-    alpha = np.zeros(n)                                  # права частина системи
-
-    for i in range(1, n - 1):
-        alpha[i] = (
-            (3 / h[i]) * (y[i + 1] - y[i])
-            - (3 / h[i - 1]) * (y[i] - y[i - 1])
+with open("tabulation.txt", "w", encoding="utf-8") as f:
+    f.write("№ | Latitude | Longitude | Elevation (m) | Distance (m)\n")
+    for i, point in enumerate(results):
+        f.write(
+            f"{i:2d} | {point['latitude']:.6f} | "
+            f"{point['longitude']:.6f} | "
+            f"{point['elevation']:.2f} | "
+            f"{distances[i]:.2f}\n"
         )
+
+
+# -------------------------------
+# 3. Кубічний сплайн
+# -------------------------------
+
+def cubic_spline_natural(x, y):
+    n = len(x)
+    h = np.diff(x)
 
     A = np.zeros(n)
     B = np.zeros(n)
     C = np.zeros(n)
     D = np.zeros(n)
 
-    B[0] = 1                                             # граничні умови
+    B[0] = 1
     B[-1] = 1
 
     for i in range(1, n - 1):
         A[i] = h[i - 1]
         B[i] = 2 * (h[i - 1] + h[i])
         C[i] = h[i]
-        D[i] = alpha[i]
+        D[i] = 6 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1])
 
-    c = thomas(A, B, C, D)                               # розв’язання системи
+    for i in range(1, n):
+        m = A[i] / B[i - 1]
+        B[i] -= m * C[i - 1]
+        D[i] -= m * D[i - 1]
+
+    M = np.zeros(n)
+    M[-1] = D[-1] / B[-1]
+
+    for i in range(n - 2, -1, -1):
+        M[i] = (D[i] - C[i] * M[i + 1]) / B[i]
+
+    a = y[:-1]
+    b = np.zeros(n - 1)
+    c = M[:-1] / 2
+    d = np.zeros(n - 1)
 
     for i in range(n - 1):
-        b[i] = (y[i + 1] - y[i]) / h[i] - h[i] * (2*c[i] + c[i + 1]) / 3
-        d[i] = (c[i + 1] - c[i]) / (3 * h[i])
-        a[i] = y[i]
+        b[i] = (y[i + 1] - y[i]) / h[i] - h[i] * (2 * M[i] + M[i + 1]) / 6
+        d[i] = (M[i + 1] - M[i]) / (6 * h[i])
 
-    return a, b, c, d                                   # коефіцієнти сплайна
+    return a, b, c, d, x
 
-a, b, c, d_coef = cubic_spline(distances, elevations)   # побудова сплайна
 
-# ==========================================================
-# 6. Обчислення значень сплайна
-# ==========================================================
+def spline_eval(xi, a, b, c, d, x_nodes):
+    if xi < x_nodes[0] or xi > x_nodes[-1]:
+        return None
 
-def spline_eval(x, x_nodes, a, b, c, d):
-    y = np.zeros_like(x)                                 # масив значень
-    for i in range(len(x_nodes) - 1):                    # перебір інтервалів
-        mask = (x >= x_nodes[i]) & (x <= x_nodes[i + 1])
-        dx = x[mask] - x_nodes[i]                        # відстань від вузла
-        y[mask] = a[i] + b[i]*dx + c[i]*dx**2 + d[i]*dx**3
-    return y
+    for i in range(len(x_nodes) - 1):
+        if x_nodes[i] <= xi <= x_nodes[i + 1]:
+            dx = xi - x_nodes[i]
+            return a[i] + b[i] * dx + c[i] * dx ** 2 + d[i] * dx ** 3
 
-xx = np.linspace(distances[0], distances[-1], 500)      # щільна сітка
-yy = spline_eval(xx, distances, a, b, c, d_coef)        # значення сплайна
+    return None
 
-# ==========================================================
-# 7. Графік профілю маршруту
-# ==========================================================
 
-os.makedirs("images", exist_ok=True)                     # папка для графіків
+x_full = np.array(distances, dtype=float)
+y_full = np.array(elevations, dtype=float)
 
-plt.figure(figsize=(8, 5))
-plt.plot(distances, elevations, 'o', label="GPS-точки")
-plt.plot(xx, yy, label="Кубічний сплайн")
-plt.title("Профіль висоти маршруту Заросляк – Говерла")
+a_full, b_full, c_full, d_full, x_nodes_full = cubic_spline_natural(x_full, y_full)
+
+xx = np.linspace(x_full[0], x_full[-1], 1000)
+yy_full = np.array(
+    [spline_eval(xi, a_full, b_full, c_full, d_full, x_nodes_full) for xi in xx],
+    dtype=float
+)
+
+
+# -------------------------------
+# 4. Аналіз вузлів
+# -------------------------------
+
+def test_nodes(k):
+    indices = np.linspace(0, len(x_full) - 1, k, dtype=int)
+    x_k = x_full[indices]
+    y_k = y_full[indices]
+
+    a_k, b_k, c_k, d_k, x_nodes_k = cubic_spline_natural(x_k, y_k)
+    yy_k = np.array(
+        [spline_eval(xi, a_k, b_k, c_k, d_k, x_nodes_k) for xi in xx],
+        dtype=float
+    )
+
+    error = np.abs(yy_k - yy_full)
+
+    print(f"\n===== {k} вузлів =====")
+    print("Максимальна похибка:", np.max(error))
+    print("Середня похибка:", np.mean(error))
+
+    return yy_k, error
+
+
+yy_10, err_10 = test_nodes(10)
+yy_15, err_15 = test_nodes(15)
+yy_20, err_20 = test_nodes(20)
+
+plt.figure()
+plt.plot(xx, yy_full, label="21 вузол (еталон)")
+plt.plot(xx, yy_10, label="10 вузлів")
+plt.plot(xx, yy_15, label="15 вузлів")
+plt.plot(xx, yy_20, label="20 вузлів")
+plt.xlabel("Відстань (м)")
+plt.ylabel("Висота (м)")
+plt.title("Вплив кількості вузлів")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+plt.figure()
+plt.plot(xx, err_10, label="10 вузлів")
+plt.plot(xx, err_15, label="15 вузлів")
+plt.plot(xx, err_20, label="20 вузлів")
+plt.xlabel("Відстань (м)")
+plt.ylabel("Похибка (м)")
+plt.title("Похибка апроксимації")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+# -------------------------------
+# 5. Графік залежності висоти від кумулятивної відстані
+# -------------------------------
+
+plt.figure()
+plt.plot(distances, elevations, "o-", color="green")
 plt.xlabel("Кумулятивна відстань (м)")
 plt.ylabel("Висота (м)")
-plt.legend()
+plt.title("Висота маршруту від кумулятивної відстані")
 plt.grid(True)
-plt.savefig("images/graph1.png", dpi=300)
 plt.show()
 
-# ==========================================================
-# 8. Вплив кількості вузлів
-# ==========================================================
 
-plt.figure(figsize=(8, 5))
+# -------------------------------
+# 6. Характеристики маршруту
+# -------------------------------
 
-for k in [10, 15, 20]:                                   # різна кількість вузлів
-    idx = np.linspace(0, n - 1, k, dtype=int)
-    x_sub = distances[idx]
-    y_sub = elevations[idx]
-
-    a1, b1, c1, d1 = cubic_spline(x_sub, y_sub)
-    xx_sub = np.linspace(x_sub[0], x_sub[-1], 400)
-    yy_sub = spline_eval(xx_sub, x_sub, a1, b1, c1, d1)
-
-    plt.plot(xx_sub, yy_sub, label=f"{k} вузлів")
-
-plt.title("Вплив кількості вузлів на точність")
-plt.xlabel("Відстань (м)")
-plt.ylabel("Висота (м)")
-plt.legend()
-plt.grid(True)
-plt.savefig("images/graph2.png", dpi=300)
-plt.show()
-
-# ==========================================================
-# 9. Порівняння та похибка
-# ==========================================================
-
-interp_vals = np.interp(xx, distances, elevations)       # лінійна інтерполяція
-error = np.abs(interp_vals - yy)                         # абсолютна похибка
-
-plt.figure(figsize=(8, 5))
-plt.plot(xx, interp_vals, label="Лінійна інтерполяція")
-plt.plot(xx, yy, label="Кубічний сплайн")
-plt.plot(xx, error, label="Похибка")
-plt.xlabel("Відстань (м)")
-plt.ylabel("Висота / Похибка (м)")
-plt.legend()
-plt.grid(True)
-plt.savefig("images/graph3.png", dpi=300)
-plt.show()
-
-# ==========================================================
-# 10. Характеристики маршруту
-# ==========================================================
-
-print("\n===== ХАРАКТЕРИСТИКИ МАРШРУТУ =====")
-
+print("\n===== Характеристики маршруту =====")
 print("Загальна довжина маршруту (м):", distances[-1])
 
-total_ascent = sum(max(elevations[i] - elevations[i - 1], 0) for i in range(1, n))
+total_ascent = sum(
+    max(elevations[i] - elevations[i - 1], 0) for i in range(1, n)
+)
 print("Сумарний набір висоти (м):", total_ascent)
 
-total_descent = sum(max(elevations[i - 1] - elevations[i], 0) for i in range(1, n))
+total_descent = sum(
+    max(elevations[i - 1] - elevations[i], 0) for i in range(1, n)
+)
 print("Сумарний спуск (м):", total_descent)
 
-# ==========================================================
-# 11. Аналіз градієнта
-# ==========================================================
 
-yy_full = yy
-grad_full = np.gradient(yy_full, xx) * 100               # градієнт у %
+# -------------------------------
+# 7. Аналіз градієнта
+# -------------------------------
 
-print("\n===== АНАЛІЗ ГРАДІЄНТА =====")
+grad_full = np.gradient(yy_full, xx) * 100
+
+print("\n===== Аналіз градієнта =====")
 print("Максимальний підйом (%):", np.max(grad_full))
 print("Максимальний спуск (%):", np.min(grad_full))
 print("Середній градієнт (%):", np.mean(np.abs(grad_full)))
 
-# ==========================================================
-# 12. Механічна енергія
-# ==========================================================
+steep_sections = np.where(np.abs(grad_full) > 15)[0]
+print("Кількість точок з крутизною > 15%:", len(steep_sections))
 
-mass = 80                                                # маса людини (кг)
-g = 9.81                                                 # прискорення вільного падіння
-energy = mass * g * total_ascent                         # механічна робота
 
-print("\n===== МЕХАНІЧНА ЕНЕРГІЯ =====")
-print("Робота (Дж):", energy)
-print("Робота (кДж):", energy / 1000)
+# -------------------------------
+# 8. Механічна енергія підйому
+# -------------------------------
+
+mass = 80
+g = 9.81
+energy = mass * g * total_ascent
+
+print("\n===== Механічна робота =====")
+print("Механічна робота (Дж):", energy)
+print("Механічна робота (кДж):", energy / 1000)
 print("Енергія (ккал):", energy / 4184)

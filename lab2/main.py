@@ -1,265 +1,312 @@
 import csv
+import math
 import os
-from typing import Tuple
-
-import numpy as np
 import matplotlib.pyplot as plt
 
 
-def read_data(filename: str) -> Tuple[np.ndarray, np.ndarray]:
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f"Файл '{filename}' не знайдено.")
+CSV_FILE = "variant5.csv"
+RESULT_FILE = "results.txt"
+PREDICT_X = 1000
+FPS_LIMIT = 60
 
+
+def read_data(filename):
     x = []
     y = []
 
-    with open(filename, 'r', newline='', encoding='utf-8') as file:
+    with open(filename, "r", newline="", encoding="utf-8") as file:
         reader = csv.DictReader(file)
-
-        if reader.fieldnames is None:
-            raise ValueError("CSV-файл порожній або не містить заголовків.")
-
-        headers = [h.strip() for h in reader.fieldnames]
-        required_headers = {"Objects", "FPS"}
-
-        if not required_headers.issubset(set(headers)):
-            raise ValueError(
-                f"У CSV повинні бути стовпці: {required_headers}. Знайдено: {headers}"
-            )
-
-        for i, row in enumerate(reader, start=2):
-            try:
-                xi = float(row["Objects"])
-                yi = float(row["FPS"])
-            except (ValueError, TypeError):
-                raise ValueError(f"Некоректні дані в рядку {i}: {row}")
-
-            if xi <= 0:
-                raise ValueError(f"Objects має бути > 0. Помилка в рядку {i}.")
-            if yi <= 0:
-                raise ValueError(f"FPS має бути > 0. Помилка в рядку {i}.")
-
-            x.append(xi)
-            y.append(yi)
-
-    if len(x) < 2:
-        raise ValueError("Для інтерполяції потрібно щонайменше 2 вузли.")
-
-    x = np.array(x, dtype=float)
-    y = np.array(y, dtype=float)
-
-    if len(np.unique(x)) != len(x):
-        raise ValueError("Значення Objects повинні бути унікальними.")
-
-    sort_idx = np.argsort(x)
-    x = x[sort_idx]
-    y = y[sort_idx]
+        for row in reader:
+            x.append(float(row["Objects"]))
+            y.append(float(row["FPS"]))
 
     return x, y
 
 
-def check_monotonic_decreasing(y: np.ndarray) -> bool:
-    return np.all(np.diff(y) < 0)
-
-
-def is_equally_spaced(x: np.ndarray, tol: float = 1e-9) -> bool:
-    if len(x) < 3:
-        return True
-    diffs = np.diff(x)
-    return np.all(np.abs(diffs - diffs[0]) < tol)
-
-
-def divided_differences_table(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+def divided_differences(x, y):
     n = len(x)
-    table = np.zeros((n, n), dtype=float)
-    table[:, 0] = y
+    table = [[0.0 for _ in range(n)] for _ in range(n)]
+
+    for i in range(n):
+        table[i][0] = y[i]
 
     for j in range(1, n):
         for i in range(n - j):
-            denominator = x[i + j] - x[i]
-            if abs(denominator) < 1e-15:
-                raise ZeroDivisionError("Знайдено однакові вузли, ділення на нуль.")
-            table[i, j] = (table[i + 1, j - 1] - table[i, j - 1]) / denominator
+            table[i][j] = (table[i + 1][j - 1] - table[i][j - 1]) / (x[i + j] - x[i])
 
     return table
 
 
-def get_newton_coefficients(diff_table: np.ndarray) -> np.ndarray:
-    return diff_table[0, :]
+def newton_interpolation(x, y, value):
+    table = divided_differences(x, y)
+    n = len(x)
 
-
-def newton_polynomial(x_data: np.ndarray, coeffs: np.ndarray, x_value: float) -> float:
-    result = coeffs[0]
+    result = table[0][0]
     product = 1.0
 
-    for i in range(1, len(coeffs)):
-        product *= (x_value - x_data[i - 1])
-        result += coeffs[i] * product
+    for j in range(1, n):
+        product *= (value - x[j - 1])
+        result += table[0][j] * product
 
     return result
 
 
-def newton_values(x_data: np.ndarray, coeffs: np.ndarray, x_values: np.ndarray) -> np.ndarray:
-    return np.array([newton_polynomial(x_data, coeffs, xv) for xv in x_values], dtype=float)
-
-
-def finite_differences_table(y: np.ndarray) -> np.ndarray:
+def finite_differences(y):
     n = len(y)
-    table = np.zeros((n, n), dtype=float)
-    table[:, 0] = y
+    table = [[0.0 for _ in range(n)] for _ in range(n)]
+
+    for i in range(n):
+        table[i][0] = y[i]
 
     for j in range(1, n):
         for i in range(n - j):
-            table[i, j] = table[i + 1, j - 1] - table[i, j - 1]
+            table[i][j] = table[i + 1][j - 1] - table[i][j - 1]
 
     return table
 
 
-def factorial_forward_interpolation(x_data: np.ndarray, y_data: np.ndarray, x_value: float) -> float:
-    if not is_equally_spaced(x_data):
-        raise ValueError("Факторіальний многочлен можна застосовувати лише для рівновіддалених вузлів.")
+def is_equally_spaced(x, eps=1e-9):
+    if len(x) < 2:
+        return False
 
-    h = x_data[1] - x_data[0]
-    t = (x_value - x_data[0]) / h
+    h = x[1] - x[0]
+    for i in range(2, len(x)):
+        if abs((x[i] - x[i - 1]) - h) > eps:
+            return False
 
-    diff_table = finite_differences_table(y_data)
-    result = diff_table[0, 0]
-    term = 1.0
+    return True
 
-    for k in range(1, len(x_data)):
-        term *= (t - (k - 1)) / k
-        result += term * diff_table[0, k]
+
+def factorial_term(t, k):
+    result = 1.0
+    for i in range(k):
+        result *= (t - i)
+    return result
+
+
+def factorial_interpolation(x, y, value):
+    if not is_equally_spaced(x):
+        raise ValueError("Факторіальний многочлен напряму застосовується тільки для рівновіддалених вузлів.")
+
+    h = x[1] - x[0]
+    t = (value - x[0]) / h
+
+    diff_table = finite_differences(y)
+
+    result = 0.0
+    for k in range(len(x)):
+        result += diff_table[0][k] * factorial_term(t, k) / math.factorial(k)
 
     return result
 
 
-def print_divided_differences_table(table: np.ndarray) -> None:
-    n = len(table)
-    print("\nТаблиця розділених різниць:")
-    for i in range(n):
-        row_values = []
-        for j in range(n - i):
-            row_values.append(f"{table[i, j]:12.6f}")
-        print(" ".join(row_values))
+def factorial_interpolation_log2(x, y, value):
+    """
+    Для варіанта 5 вузли 100, 200, 400, 800, 1600 не є рівновіддаленими по x,
+    але є рівновіддаленими після заміни z = log2(x / x0).
+    """
+    if value <= 0 or any(v <= 0 for v in x):
+        raise ValueError("Для log2-перетворення всі x повинні бути додатними.")
+
+    x0 = x[0]
+    z = [math.log2(xi / x0) for xi in x]
+    zv = math.log2(value / x0)
+
+    return factorial_interpolation(z, y, zv)
 
 
-def find_threshold_objects(
-    x_data: np.ndarray,
-    coeffs: np.ndarray,
-    fps_limit: float,
-    left: float,
-    right: float,
-    eps: float = 1e-6,
-    max_iter: int = 200
-) -> float:
-    f_left = newton_polynomial(x_data, coeffs, left) - fps_limit
-    f_right = newton_polynomial(x_data, coeffs, right) - fps_limit
-
-    if f_left < 0:
-        raise ValueError("У лівій межі FPS вже менший за поріг.")
-    if f_right > 0:
-        raise ValueError("У правій межі FPS ще не опустився до порога.")
-
-    for _ in range(max_iter):
-        mid = (left + right) / 2
-        f_mid = newton_polynomial(x_data, coeffs, mid) - fps_limit
-
-        if abs(f_mid) < eps:
-            return mid
-
-        if f_mid > 0:
-            left = mid
-        else:
-            right = mid
-
-    return (left + right) / 2
+def print_divided_differences_table(x, table):
+    print("Таблиця розділених різниць:")
+    for i in range(len(x)):
+        row = [f"x[{i}] = {x[i]:.2f}"]
+        for j in range(len(x) - i):
+            row.append(f"{table[i][j]:.6f}")
+        print(" | ".join(row))
 
 
-def leave_one_out_error(x: np.ndarray, y: np.ndarray) -> float:
+def find_threshold_x(x_min, x_max, func, limit):
+    """
+    Шукає приблизне максимальне x, при якому FPS >= limit
+    """
+    left = x_min
+    right = x_max
+    step = 1.0
+
+    best_x = None
+    current = left
+
+    while current <= right:
+        if func(current) >= limit:
+            best_x = current
+        current += step
+
+    return best_x
+
+
+def lagrange_interpolation(x, y, value):
     n = len(x)
-    if n < 3:
-        return float("nan")
-
-    errors = []
+    result = 0.0
 
     for i in range(n):
-        x_train = np.delete(x, i)
-        y_train = np.delete(y, i)
+        term = y[i]
+        for j in range(n):
+            if i != j:
+                term *= (value - x[j]) / (x[i] - x[j])
+        result += term
 
-        table = divided_differences_table(x_train, y_train)
-        coeffs = get_newton_coefficients(table)
+    return result
 
-        y_pred = newton_polynomial(x_train, coeffs, x[i])
-        errors.append(abs(y_pred - y[i]))
 
-    return float(np.mean(errors))
+def mean_abs_error(y_true, y_pred):
+    return sum(abs(a - b) for a, b in zip(y_true, y_pred)) / len(y_true)
+
+
+def research_errors(x, y):
+    """
+    За методичкою треба n = 5, 10, 20.
+    Якщо у файлі лише 5 вузлів, реально можна дослідити тільки 5.
+    """
+    counts = [5, 10, 20]
+    available = [c for c in counts if c <= len(x)]
+
+    if not available:
+        available = [len(x)]
+
+    results = []
+
+    for n in available:
+        x_n = x[:n]
+        y_n = y[:n]
+
+        test_x = []
+        newton_pred = []
+        factorial_pred = []
+
+        for xi in x_n:
+            test_x.append(xi)
+            newton_pred.append(newton_interpolation(x_n, y_n, xi))
+
+            try:
+                factorial_pred.append(factorial_interpolation_log2(x_n, y_n, xi))
+            except Exception:
+                factorial_pred.append(None)
+
+        newton_error = mean_abs_error(y_n, newton_pred)
+
+        if all(v is not None for v in factorial_pred):
+            factorial_error = mean_abs_error(y_n, factorial_pred)
+        else:
+            factorial_error = None
+
+        results.append((n, newton_error, factorial_error))
+
+    return results
+
+
+def save_results(filename, text):
+    with open(filename, "w", encoding="utf-8") as file:
+        file.write(text)
 
 
 def main():
-    filename = "variant5.csv"
+    if not os.path.exists(CSV_FILE):
+        print(f"Файл {CSV_FILE} не знайдено.")
+        return
+
+    x, y = read_data(CSV_FILE)
+
+    dd_table = divided_differences(x, y)
+    print_divided_differences_table(x, dd_table)
+
+    newton_value = newton_interpolation(x, y, PREDICT_X)
+    lagrange_value = lagrange_interpolation(x, y, PREDICT_X)
 
     try:
-        x, y = read_data(filename)
+        factorial_value = factorial_interpolation_log2(x, y, PREDICT_X)
+        factorial_text = f"{factorial_value:.6f}"
+    except Exception as e:
+        factorial_value = None
+        factorial_text = f"не обчислено ({e})"
 
-        print("Зчитані дані:")
-        for xi, yi in zip(x, y):
-            print(f"Objects = {xi:.0f}, FPS = {yi:.2f}")
+    fps_function = lambda value: newton_interpolation(x, y, value)
+    max_objects_for_60fps = find_threshold_x(min(x), max(x), fps_function, FPS_LIMIT)
 
-        if not check_monotonic_decreasing(y):
-            print("\nПопередження: FPS не є строго спадною функцією.")
+    research = research_errors(x, y)
+
+    result_text = []
+    result_text.append("ЛАБОРАТОРНА РОБОТА №2")
+    result_text.append("Варіант 5. Оптимізація ігрового рушія. Прогнозування FPS\n")
+
+    result_text.append("Вхідні дані:")
+    for xi, yi in zip(x, y):
+        result_text.append(f"Objects = {xi:.0f}, FPS = {yi:.2f}")
+
+    result_text.append("\nПрогноз для 1000 об'єктів:")
+    result_text.append(f"Ньютон: {newton_value:.6f}")
+    result_text.append(f"Факторіальний многочлен: {factorial_text}")
+    result_text.append(f"Лагранж: {lagrange_value:.6f}")
+    result_text.append(f"\nМаксимальна кількість об'єктів, при якій FPS >= 60: {max_objects_for_60fps:.0f}")
+
+    result_text.append("\nДослідження похибок:")
+    for n, err_newton, err_factorial in research:
+        result_text.append(f"n = {n}:")
+        result_text.append(f"  Похибка Ньютона = {err_newton:.10f}")
+        if err_factorial is not None:
+            result_text.append(f"  Похибка факторіального многочлена = {err_factorial:.10f}")
         else:
-            print("\nПеревірка пройдена: FPS спадає зі збільшенням кількості об'єктів.")
+            result_text.append("  Похибка факторіального многочлена = не обчислено")
 
-        table = divided_differences_table(x, y)
-        coeffs = get_newton_coefficients(table)
-        print_divided_differences_table(table)
+    save_results(RESULT_FILE, "\n".join(result_text))
 
-        target_objects = 1000
-        fps_newton = newton_polynomial(x, coeffs, target_objects)
-        print(f"\nПрогноз FPS для {target_objects} об'єктів (Ньютон): {fps_newton:.6f}")
+    print("\n" + "\n".join(result_text))
 
-        if is_equally_spaced(x):
-            fps_factorial = factorial_forward_interpolation(x, y, target_objects)
-            print(f"Прогноз FPS для {target_objects} об'єктів (факторіальний): {fps_factorial:.6f}")
-        else:
-            print("Факторіальний многочлен не обчислювався, бо вузли не є рівновіддаленими.")
+    x_plot = []
+    y_newton = []
+    y_factorial = []
 
-        fps_limit = 60.0
-        if newton_polynomial(x, coeffs, x[0]) < fps_limit:
-            print("Навіть при мінімальній кількості об'єктів FPS < 60.")
-        elif newton_polynomial(x, coeffs, x[-1]) > fps_limit:
-            print("Навіть при максимальній кількості об'єктів FPS > 60.")
-        else:
-            threshold = find_threshold_objects(x, coeffs, fps_limit, x[0], x[-1])
-            print(f"Гранична кількість об'єктів для FPS >= 60: приблизно {threshold:.2f}")
+    start = int(min(x))
+    end = int(max(x))
 
-        cv_error = leave_one_out_error(x, y)
-        print(f"\nСередня похибка leave-one-out: {cv_error:.6f}")
+    for value in range(start, end + 1, 10):
+        x_plot.append(value)
+        y_newton.append(newton_interpolation(x, y, value))
 
-        print("\nДослідження кількості вузлів:")
-        for count in [5, 10, 20]:
-            if count > len(x):
-                print(f"{count} вузлів: неможливо дослідити, бо у файлі лише {len(x)} точок.")
-            else:
-                print(f"{count} вузлів: доступно для дослідження.")
+        try:
+            y_factorial.append(factorial_interpolation_log2(x, y, value))
+        except Exception:
+            y_factorial.append(None)
 
-        x_plot = np.linspace(x[0], x[-1], 500)
-        y_plot = newton_values(x, coeffs, x_plot)
+    plt.figure(figsize=(10, 6))
+    plt.scatter(x, y, label="Експериментальні точки")
+    plt.plot(x_plot, y_newton, label="Інтерполяційний многочлен Ньютона")
 
-        plt.figure(figsize=(10, 6))
-        plt.plot(x_plot, y_plot, label="Інтерполяційний многочлен Ньютона")
-        plt.scatter(x, y, label="Експериментальні точки")
-        plt.axhline(60, linestyle="--", label="FPS = 60")
-        plt.xlabel("Кількість об'єктів")
-        plt.ylabel("FPS")
-        plt.title("Прогнозування FPS залежно від кількості об'єктів")
+    if all(v is not None for v in y_factorial):
+        plt.plot(x_plot, y_factorial, label="Факторіальний многочлен")
+
+    plt.axhline(y=60, linestyle="--", label="FPS = 60")
+    plt.axvline(x=PREDICT_X, linestyle="--", label="n = 1000")
+
+    plt.xlabel("Objects")
+    plt.ylabel("FPS")
+    plt.title("FPS(n)")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+    if research:
+        nodes = [item[0] for item in research]
+        newton_errors = [item[1] for item in research]
+        factorial_errors = [item[2] if item[2] is not None else 0 for item in research]
+
+        plt.figure(figsize=(8, 5))
+        plt.plot(nodes, newton_errors, marker="o", label="Ньютон")
+        plt.plot(nodes, factorial_errors, marker="o", label="Факторіальний многочлен")
+        plt.xlabel("Кількість вузлів")
+        plt.ylabel("Похибка")
+        plt.title("Графік похибок")
         plt.grid(True)
         plt.legend()
-        plt.tight_layout()
         plt.show()
-
-    except Exception as e:
-        print(f"Помилка: {e}")
 
 
 if __name__ == "__main__":
